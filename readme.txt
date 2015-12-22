@@ -1,1 +1,1 @@
-java组建学习 ：javaweb zookeeper mq  mongodb redis 异步任务，工具类学习等等 
+java组件学习 ：javaweb zookeeper mq  mongodb redis 异步任务 工具类 分布式学习等等 
