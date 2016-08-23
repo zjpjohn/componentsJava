@@ -26,8 +26,17 @@ import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.index.query.*;
 import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.aggregations.Aggregation;
+import org.elasticsearch.search.aggregations.AggregationBuilders;
+import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
+import org.elasticsearch.search.aggregations.bucket.terms.TermsBuilder;
+import org.elasticsearch.search.facet.FacetBuilders;
+import org.elasticsearch.search.facet.terms.TermsFacet;
+import org.elasticsearch.search.facet.terms.TermsFacetBuilder;
 import org.elasticsearch.search.highlight.HighlightField;
 import org.elasticsearch.search.sort.SortOrder;
+import org.elasticsearch.search.suggest.Suggest;
+import org.elasticsearch.search.suggest.completion.CompletionSuggestionBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -35,7 +44,10 @@ import org.springframework.stereotype.Service;
 import javax.annotation.Resource;
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.util.*;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -484,7 +496,18 @@ public class SearchService {
                                    String field,
                                    String value,
                                    int count) {
-        return null;
+        List<String> result = Lists.newArrayList();
+        CompletionSuggestionBuilder suggestionBuilder = new CompletionSuggestionBuilder("suggest");
+        suggestionBuilder.field(field).text(value).size(count);
+        SearchResponse response = transportClient.prepareSearch(indexNames)
+                .addSuggestion(suggestionBuilder)
+                .execute()
+                .actionGet();
+        List<? extends Suggest.Suggestion.Entry<? extends Suggest.Suggestion.Entry.Option>> entries = response.getSuggest().getSuggestion("suggest").getEntries();
+        for (Suggest.Suggestion.Entry<? extends Suggest.Suggestion.Entry.Option> entry : entries) {
+            result.add(entry.getText().toString());
+        }
+        return result;
     }
 
     /**
@@ -496,11 +519,25 @@ public class SearchService {
      * @param groupFields
      * @return
      */
-    public Map<String, String> group(String indexName,
+    public Map<String, Object> group(String indexName,
                                      Map<String, SearchCondition> mustCondition,
                                      Map<String, SearchCondition> shouldCondition,
                                      String[] groupFields) {
-        return null;
+        QueryBuilder mustQuery = createQueryBuilder(mustCondition, SearchLogic.must);
+        QueryBuilder shouldQuery = createQueryBuilder(shouldCondition, SearchLogic.should);
+
+        if (mustQuery == null && shouldQuery == null) {
+            return null;
+        }
+        BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
+        if (mustQuery != null) {
+            boolQuery.must(mustQuery);
+        }
+        if (shouldQuery != null) {
+            boolQuery.should(shouldQuery);
+        }
+
+        return group(indexName, boolQuery, groupFields);
     }
 
 
@@ -512,8 +549,20 @@ public class SearchService {
      * @param groupFields
      * @return
      */
-    private Map<String, String> group(String indexName, QueryBuilder queryBuilder, String[] groupFields) {
-        return null;
+    private Map<String, Object> group(String indexName, QueryBuilder queryBuilder, String[] groupFields) {
+        TermsFacetBuilder facetBuilder = FacetBuilders.termsFacet("group").fields(groupFields);
+        SearchResponse response = transportClient.prepareSearch(indexName)
+                .setQuery(queryBuilder)
+                .addFacet(facetBuilder)
+                .setExplain(true)
+                .execute()
+                .actionGet();
+        TermsFacet facet = response.getFacets().facet(TermsFacet.class, "group");
+        Map<String, Object> result = Maps.newHashMap();
+        for (TermsFacet.Entry entry : facet.getEntries()) {
+            result.put(entry.getTerm().toString(), entry.getCount());
+        }
+        return result;
     }
 
     /**
@@ -530,4 +579,106 @@ public class SearchService {
         return 0;
     }
 
+    /**
+     * facet查询
+     *
+     * @param index      索引
+     * @param type       类型
+     * @param fields     查询字段
+     * @param facetField facet字段
+     * @param condition  查询条件
+     * @return
+     */
+    public Map<String, Object> queryFacets(String index,
+                                           String type,
+                                           List<String> fields,
+                                           String facetField,
+                                           String condition) {
+        QueryStringQueryBuilder query = QueryBuilders.queryStringQuery(condition);
+        query.analyzer("ik");
+        //要查询的字段
+        for (String field : fields) {
+            query.field(field);
+        }
+        SearchResponse response = transportClient.prepareSearch(index)
+                .setTypes(type)
+                .setQuery(query)
+                .addFacet(FacetBuilders.termsFacet("termFacet").fields(facetField))
+                .addSort("_score", SortOrder.DESC)
+                .addSort("updateTime", SortOrder.DESC)
+                .execute()
+                .actionGet();
+        TermsFacet termFacet = (TermsFacet) response.getFacets().facetsAsMap().get("termFacet");
+        Map<String, Object> result = Maps.newHashMap();
+        for (TermsFacet.Entry entry : termFacet.getEntries()) {
+            result.put(entry.getTerm().toString(), entry.getCount());
+        }
+        return result;
+    }
+
+    /**
+     * aggregate 统计查询
+     *
+     * @param index
+     * @param fields
+     * @param aggField
+     * @param condition
+     * @return
+     */
+    public Map<String, Object> queryAggregate(String index,
+                                              List<String> fields,
+                                              String aggField,
+                                              String condition) {
+        QueryStringQueryBuilder query = QueryBuilders.queryStringQuery(condition);
+        query.analyzer("ik");
+        for (String field : fields) {
+            query.field(field);
+        }
+        TermsBuilder aggregation = AggregationBuilders.terms(aggField).field(aggField);
+
+        SearchResponse response = transportClient.prepareSearch(index)
+                .setQuery(query)
+                .addAggregation(aggregation)
+                .execute()
+                .actionGet();
+        Map<String, Object> result = Maps.newHashMap();
+        Map<String, Aggregation> aggregationMap = response.getAggregations().asMap();
+        for (Map.Entry<String, Aggregation> entry : aggregationMap.entrySet()) {
+            result.put(entry.getKey(), ((StringTerms) entry.getValue()).getBucketByKey(aggField).getDocCount());
+        }
+        return result;
+    }
+
+    /**
+     * 相似查询
+     *
+     * @param index
+     * @param type
+     * @param names
+     * @param condition
+     * @return
+     */
+    public List<String> queryMoreLikeThis(String index,
+                                          String type,
+                                          String[] names,
+                                          String condition,
+                                          int pageIndex,
+                                          int limit) {
+        List<String> results = Lists.newArrayList();
+        MoreLikeThisQueryBuilder queryBuilder = QueryBuilders.moreLikeThisQuery(names)
+                .boost(1.0f)
+                .likeText(condition)
+                .minTermFreq(10);
+        SearchResponse response = transportClient.prepareSearch(index)
+                .setTypes(type)
+                .setQuery(queryBuilder)
+                .setFrom((pageIndex - 1) * limit)
+                .setSize(limit)
+                .execute()
+                .actionGet();
+        for (SearchHit searchHit : response.getHits().getHits()) {
+            results.add(searchHit.getSourceAsString());
+        }
+        return results;
+    }
 }
