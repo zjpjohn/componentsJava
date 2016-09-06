@@ -2,6 +2,7 @@ package com.java.component.ratelimit;
 
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.RateLimiter;
+import org.springframework.beans.factory.InitializingBean;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,9 +34,28 @@ import java.util.concurrent.TimeUnit;
  * Time: 14:41
  */
 
-public class RateLimiterHelper {
+public class RateLimiterHelper implements InitializingBean {
 
     private static Map<String, RateLimiter> rateLimiterMap = new ConcurrentHashMap<>();
+
+    private Map<String, Integer> rateLimits;
+
+    public Map<String, Integer> getRateLimits() {
+        return rateLimits;
+    }
+
+    public void setRateLimits(Map<String, Integer> rateLimits) {
+        this.rateLimits = rateLimits;
+        for (Map.Entry<String, Integer> entry : rateLimits.entrySet()) {
+            RateLimiter limiter = rateLimiterMap.get(entry.getKey());
+            if (limiter == null) {
+                create(entry.getKey(), entry.getValue());
+            } else {
+                setRate(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
 
     /**
      * 根据指定的稳定吞吐量创建RateLimiter，这里的吞吐率是指每秒多少许可数(QPS)
@@ -173,5 +193,24 @@ public class RateLimiterHelper {
     public static boolean tryAcquire(String serviceName, int permits, long timeout, TimeUnit unit) {
         RateLimiter rateLimiter = Preconditions.checkNotNull(rateLimiterMap.get(serviceName));
         return rateLimiter.tryAcquire(permits, timeout, unit);
+    }
+
+    /**
+     * 创建限流器集合
+     *
+     * @throws Exception
+     */
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        Preconditions.checkArgument(rateLimits != null && rateLimits.size() > 0,
+                "rateLimits must not be empty...");
+        for (Map.Entry<String, Integer> entry : rateLimits.entrySet()) {
+            RateLimiter rateLimiter = rateLimiterMap.get(entry.getKey());
+            if (rateLimiter == null) {
+                create(entry.getKey(), entry.getValue());
+            } else {
+                setRate(entry.getKey(), entry.getValue());
+            }
+        }
     }
 }
